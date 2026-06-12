@@ -1,0 +1,54 @@
+Aim for in-between SA2 and Unleashed.
+
+No boost or spin dash, you set a set ammount of speed at the start of the stage and are able to gain speed be abusing momentum
+
+Tracks should vary on all 3 dimentions, hella turns, and ways to go up and down in the stage
+
+Drifting:
+	Drift arc changes based on how fast ur going, fast = bigger swing
+
+Drop Dash:
+	Converts vertical momentum into horizontal momentum, has the potential to lose speed if you just abuse it
+
+Tricking:
+	Basically just acts as a way to get extra air time, if you spam it you start to lose horizontal speed
+
+Light Speed Dash:
+	Completely converts your mommentum based on ring trail direction
+
+Homing Attack (Aim to make it feel smoother):
+	Triggers Attacking Flag and slightly increase momentum but don't ever lose it
+	Have some enemys you cant kill, for example have the player react by having options like sliding
+
+Rolling:
+	Gain speed if going down hill lose speed if not.
+	Gain Extra Speed if u Drop Dash into it
+
+Stomping:
+	Just a reaction and knowlege check.
+	Maybe cancelable into Drop Dash
+
+2D Sections (Think Generations): 
+	Bounding Box based trigger system
+	Should be overly short if done right
+	Should barely even be platforming just basic reaction checks like sliding and jumping to bounce off enemys to go on paths
+
+Style System:
+	Scales the top speed by style ranks
+	Gain Style by killing enemys and dodging without losing momentum, if you stop to kill shit thats lame
+
+Rails:
+	More or less just transitions
+	Gain momentum by leaning with the curves, or just dont, you only get punished if you attempt and fail
+
+General Notes On How To Feel Fast Asf:
+	Scale Fov Based on Speed
+	Hella Motion Blur
+	Have The Camera Be Close To Sonic
+	Make Track Lengths Slightly Shorter Than You Think To Have Less Reaction Time
+	U Make The Game Dawg, Have The Nigga Out run the Camera at times
+
+Enemys:
+	Just cus you go fast doesnt mean ur safe (issue i noted in generations)
+	In generations/unleashed if you had boost enemys werent shit
+	Make Enemys A Part Of The Stage (Secret Paths if you homing attack in a certain Direction)
