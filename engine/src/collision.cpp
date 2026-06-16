@@ -228,6 +228,28 @@ bool CollisionMesh::raycast(const glm::vec3& origin, const glm::vec3& dir, float
     return true;
 }
 
+void CollisionMesh::clear() {
+    m_triangles.clear();
+    m_nodes.clear();
+    m_rootIndex = -1;
+}
+
+void CollisionMesh::addTriangles(const std::vector<Vertex>& verts, const std::vector<unsigned int>& indices,
+                                  const glm::mat4& transform) {
+    for (size_t i = 0; i + 2 < indices.size(); i += 3) {
+        CollisionTriangle tri;
+        tri.v0 = glm::vec3(transform * glm::vec4(verts[indices[i + 0]].position, 1.0f));
+        tri.v1 = glm::vec3(transform * glm::vec4(verts[indices[i + 1]].position, 1.0f));
+        tri.v2 = glm::vec3(transform * glm::vec4(verts[indices[i + 2]].position, 1.0f));
+
+        glm::vec3 n = glm::cross(tri.v1 - tri.v0, tri.v2 - tri.v0);
+        float len = glm::length(n);
+        tri.normal = len > 1e-8f ? n / len : glm::vec3(0, 1, 0);
+
+        m_triangles.push_back(tri);
+    }
+}
+
 bool CollisionMesh::resolveSphere(glm::vec3& center, float radius, glm::vec3* outNormal) const {
     if (m_rootIndex < 0) return false;
 

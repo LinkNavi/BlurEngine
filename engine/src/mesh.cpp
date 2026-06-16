@@ -494,49 +494,86 @@ AnimatedModel::AnimatedModel(Model model) : m_model(std::move(model)) {
     m_workingVertices = m_model.meshVertices;
 }
 
-void AnimatedModel::playAnimation(const std::string& name, bool loop) {
+void AnimatedModel::playAnimation(const std::string& name, bool loop, float blendDuration) {
     int idx = m_model.findAnimation(name);
     if (idx < 0) {
         std::fprintf(stderr, "AnimatedModel: animation '%s' not found\n", name.c_str());
         return;
     }
-    playAnimation(idx, loop);
+    playAnimation(idx, loop, blendDuration);
 }
 
-void AnimatedModel::playAnimation(int index, bool loop) {
+void AnimatedModel::playAnimation(int index, bool loop, float blendDuration) {
     if (index < 0 || index >= (int)m_model.animations.size()) return;
+    if (index == m_currentAnimation) { m_looping = loop; return; }
+
+    if (m_currentAnimation >= 0 && blendDuration > 0.0f) {
+        m_previousAnimation = m_currentAnimation;
+        m_prevAnimTime      = m_animTime;
+        m_prevLooping       = m_looping;
+        m_blendElapsed      = 0.0f;
+        m_blendDuration      = blendDuration;
+    } else {
+        m_previousAnimation = -1;
+    }
+
     m_currentAnimation = index;
     m_animTime = 0.0f;
     m_looping = loop;
 }
 
-void AnimatedModel::stopAnimation() {
-    m_currentAnimation = -1;
-}
-
 void AnimatedModel::update(float deltaTime) {
     m_wobbleTime += deltaTime;
+
+    bool blending = m_previousAnimation >= 0 && hasSkeleton();
 
     if (m_currentAnimation >= 0 && hasSkeleton()) {
         const Animation& anim = m_model.animations[m_currentAnimation];
         m_animTime += deltaTime;
-
         if (anim.duration > 0.0f) {
-            if (m_looping) {
-                m_animTime = std::fmod(m_animTime, anim.duration);
-            } else if (m_animTime > anim.duration) {
-                m_animTime = anim.duration;
-            }
+            if (m_looping) m_animTime = std::fmod(m_animTime, anim.duration);
+            else if (m_animTime > anim.duration) m_animTime = anim.duration;
         }
-
         anim.sample(m_animTime, m_model.skeleton, m_localTransforms);
-        computeSkinningMatrices(m_model.skeleton, m_localTransforms, m_skinningMatrices);
+
+        if (blending) {
+            const Animation& prevAnim = m_model.animations[m_previousAnimation];
+            m_prevAnimTime += deltaTime;
+            if (prevAnim.duration > 0.0f) {
+                if (m_prevLooping) m_prevAnimTime = std::fmod(m_prevAnimTime, prevAnim.duration);
+                else if (m_prevAnimTime > prevAnim.duration) m_prevAnimTime = prevAnim.duration;
+            }
+            prevAnim.sample(m_prevAnimTime, m_model.skeleton, m_prevLocalTransforms);
+
+            m_blendElapsed += deltaTime;
+            float alpha = glm::clamp(m_blendElapsed / m_blendDuration, 0.0f, 1.0f);
+
+            size_t count = m_localTransforms.size();
+            m_blendedLocal.resize(count);
+            for (size_t i = 0; i < count; i++) {
+                const glm::mat4& a = (i < m_prevLocalTransforms.size()) ? m_prevLocalTransforms[i] : m_localTransforms[i];
+                const glm::mat4& b = m_localTransforms[i];
+                glm::mat4 r;
+                for (int c = 0; c < 4; c++) r[c] = glm::mix(a[c], b[c], alpha);
+                m_blendedLocal[i] = r;
+            }
+
+            computeSkinningMatrices(m_model.skeleton, m_blendedLocal, m_skinningMatrices);
+            if (alpha >= 1.0f) m_previousAnimation = -1;
+        } else {
+            computeSkinningMatrices(m_model.skeleton, m_localTransforms, m_skinningMatrices);
+        }
     }
 
     if (m_wobbleEnabled || m_customEditFn) {
         applyVertexEdits();
     }
 }
+void AnimatedModel::stopAnimation() {
+    m_currentAnimation = -1;
+}
+
+
 
 void AnimatedModel::applyVertexEdits() {
     for (size_t m = 0; m < m_model.meshes.size(); m++) {

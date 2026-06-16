@@ -31,13 +31,13 @@ struct PlayerTuning {
     // --- Ground movement ---
     float maxSpeed          = 28.0f;   // top run speed (Unleashed is FAST)
     float startSpeed        = 8.0f;    // set at stage start, gained through momentum
-    float accel             = 3.0f;   // gain per second while pushing stick
+    float accel             = 8.0f;   // gain per second while pushing stick
     float decel             = 10.0f;   // loss per second when stick neutral
     float brakeDecel        = 48.0f;   // loss per second when pushing against heading
     float turnRateSlow = 2.0f;   // rad/s when nearly stopped (tight, responsive)
-    float turnRateFast = 0.8f;   // rad/s at max speed (wide arc)
+    float turnRateFast = 1.15f;
     float lookAheadDist     = 5.0f;
-
+float groundClearance = 0.04f;
     // --- Slope momentum ---
     float slopeAccel        = 12.0f;   // speed gain per unit of downhill grade
     float slopeDecel        = 8.0f;    // loss per unit of uphill grade
@@ -58,7 +58,7 @@ struct PlayerTuning {
     float gravity           = 22.0f;   // downward accel while airborne
     float airControlScale   = 0.35f;   // how much the stick steers in the air
     float airTurnRate       = 1.8f;    // rad/s steering rate while airborne
-
+    float modelPitchOffset = glm::half_pi<float>();
     // --- Surface tracking ---
     float wallDeltaBase     = 0.62f;
     float wallDeltaPerSpeed = 0.022f;
@@ -67,6 +67,12 @@ struct PlayerTuning {
     float upEase            = 12.0f;
     float groundProbeUp     = 5.0f;
     float groundProbeDown   = 50.0f;
+
+    // animations
+    float animBlendTime = 0.15f; // Self Explained
+    float animRateMin = 0.4f;  // playback rate floor (was 0.5–0.7 depending on bracket)
+    float animRateMax = 5.0f;  // playback rate ceiling (was 1.8–2.2)
+    float animRateCurve = 0.7f; // <1 = ramps up fast then tapers, >1 = ramps up slow then accelerates
 };
 
 // Movement state machine
@@ -120,10 +126,14 @@ private:
 
     void resolveGround(const GroundSample& g, glm::vec3& nextPos, glm::vec3& newUp);
     void reorthogonalize();
-
+    std::string m_lastAnimName;
+    float       m_airTime          = 0.0f;
+    float       m_landingLockTimer = 0.0f;
+    float       m_qsSide           = 1.0f;
     PlayerTuning      m_tuning;
     blur::AnimatedModel m_anim;
-
+    float m_animPlaybackRate = 1.0f;
+void playIfChanged(const std::string& name, bool loop);
     glm::vec3  m_pos     {0.0f};
     glm::vec3  m_forward {0.0f, 0.0f, 1.0f};
     glm::vec3  m_right   {1.0f, 0.0f, 0.0f};

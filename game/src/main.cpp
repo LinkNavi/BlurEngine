@@ -149,6 +149,12 @@ struct CamTuning {
     float fovBase     = 65.0f;  // FOV at rest
     float fovMax      = 95.0f;  // FOV at top speed (speed blur comes from this)
     float blurMax     = 0.45f;  // max motion blur strength (0..1)
+
+    // Slope-follow: camera rises on downhill (see further down the drop)
+    // and lowers on uphill (see what's cresting), smoothed so it doesn't
+    // jitter over every bump.
+    float slopeHeightScale = 2.0f;  // camera height shift per unit of slope (forward.y is -1..1)
+    float slopeSmoothRate  = 6.0f;
 };
 
 constexpr CamTuning kCam;
@@ -292,8 +298,9 @@ int main(int argc, char** argv) {
     unsigned int quadVAO = buildQuadVAO();
 
     // --- Camera state ---
-    float camYaw    = 0.0f;
-    float currentFov= kCam.fovBase;
+    float camYaw       = 0.0f;
+    float currentFov    = kCam.fovBase;
+    float smoothedSlope = 0.0f;
 
     sonic.setPosition(glm::vec3(0.0f, 3.0f, 3.0f));
 
@@ -367,11 +374,7 @@ int main(int argc, char** argv) {
 
         // --- Player update ---
         sonic.update(dt, input, camDir, camRight, ground);
-        std::printf("[MAIN] speed=%.2f pos=(%.2f,%.2f,%.2f) forward=(%.2f,%.2f,%.2f) state=%d\n",
-            sonic.speed(),
-            sonic.position().x, sonic.position().y, sonic.position().z,
-            sonic.forward().x, sonic.forward().y, sonic.forward().z,
-            (int)sonic.state());
+
         // --- Camera yaw tracking ---
         // Camera trails player facing. At high speed it lags a bit more so
         // Sonic can outrun the camera briefly (that Unleashed feeling of
@@ -390,11 +393,34 @@ int main(int argc, char** argv) {
         float targetFov = glm::mix(kCam.fovBase,     kCam.fovMax,    speedT * speedT);
         currentFov      = glm::mix(currentFov, targetFov, glm::clamp(5.0f * dt, 0.0f, 1.0f));
 
+        // --- Slope-driven camera height ---
+        // forward() is reorthogonalized against the ground normal each
+        // frame, so its y component is exactly the slope sign/steepness:
+        // positive = climbing uphill, negative = heading downhill.
+        float slopeRaw = glm::clamp(sonic.forward().y, -1.0f, 1.0f);
+        smoothedSlope  = glm::mix(smoothedSlope, slopeRaw, glm::clamp(kCam.slopeSmoothRate * dt, 0.0f, 1.0f));
+        camHeight     += smoothedSlope * kCam.slopeHeightScale;
+        camHeight      = glm::max(camHeight, 0.6f); // floor so it can't dip to/under ground on a steep downhill
+
         camDir = glm::normalize(glm::vec3(std::sin(camYaw), 0.0f, std::cos(camYaw)));
         glm::vec3 camEye    = ppos - camDir * camDist + glm::vec3(0,1,0) * camHeight;
-        glm::vec3 camTarget = ppos + sonic.up() * kCam.lookAtBias;
-        glm::mat4 view      = glm::lookAt(camEye, camTarget, glm::vec3(0,1,0));
-        glm::mat4 proj      = glm::perspective(
+        glm::vec3 camTarget = ppos + glm::vec3(0,1,0) * kCam.lookAtBias;
+
+        // --- Camera collision: pull the eye in if terrain is in the way ---
+        glm::vec3 camToEye = camEye - camTarget;
+        float camToEyeDist = glm::length(camToEye);
+        if (camToEyeDist > 1e-4f) {
+            glm::vec3 dirN = camToEye / camToEyeDist;
+            const blur::CollisionMesh& camCollision = debugMode ? track.collision() : worldCollision;
+            blur::CollisionHit camHit;
+            if (!camCollision.empty() && camCollision.raycast(camTarget, dirN, camToEyeDist, camHit)) {
+                float safeDist = glm::max(camHit.distance - 0.35f, 1.0f);
+                camEye = camTarget + dirN * safeDist;
+            }
+        }
+
+        glm::mat4 view = glm::lookAt(camEye, camTarget, glm::vec3(0,1,0));
+        glm::mat4 proj = glm::perspective(
             glm::radians(currentFov),
             (float)window.width() / (float)window.height(),
             0.05f, 500.0f);

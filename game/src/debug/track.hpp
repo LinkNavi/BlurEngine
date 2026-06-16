@@ -1,6 +1,7 @@
 #pragma once
 
 #include "blur/mesh.hpp"
+#include "blur/collision.hpp"
 #include <glm/glm.hpp>
 #include <deque>
 #include <vector>
@@ -21,7 +22,7 @@ struct TrackFrame {
 class EndlessTrack {
 public:
     EndlessTrack(float width, float segmentLength, float chunkLength, unsigned int seed);
-
+const blur::CollisionMesh& collision() const;
     void update(float playerArcLength, float aheadDistance);
     void trim(float playerArcLength, float behindDistance);
 
@@ -40,13 +41,19 @@ public:
 private:
     struct Chunk {
         blur::Mesh mesh;
+        std::vector<blur::Vertex> verts;
+        std::vector<unsigned int> indices;
         float startArc;
         float endArc;
     };
 
+    float m_yawHeading   = 0.0f; // accumulated yaw angle from start direction
+    float m_pitchHeading = 0.0f; // accumulated pitch angle (tilt up/down)
     void generateNextChunk();
     float randomFloat();
-
+    mutable blur::CollisionMesh m_collision;
+    mutable bool m_collisionDirty = false;
+    void rebuildCollision() const;
     float m_width;
     float m_segmentLength;
     float m_chunkLength;
@@ -63,6 +70,8 @@ private:
     static constexpr float kMaxPitchCurvature = 0.12f;
     static constexpr float kRetargetInterval = 14.0f;
     static constexpr float kCurvatureSmoothing = 0.04f;
+    static constexpr float kMaxYawHeading   = glm::radians(100.0f); // hard cap, well short of 180 — track can never curve back into a loop
+    static constexpr float kMaxPitchHeading = glm::radians(35.0f);  // how steep it can tilt up/down
     static constexpr float kTileWorldSize = 2.0f;
 };
 

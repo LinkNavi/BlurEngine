@@ -31,8 +31,13 @@ glm::vec3 rotateAround(const glm::vec3& v, const glm::vec3& axis, float angle) {
 Player::Player(blur::Model model, PlayerTuning tuning)
     : m_tuning(tuning), m_anim(std::move(model)) {
     m_speed = m_tuning.startSpeed;
-    if (!m_anim.animations().empty())
-        m_anim.playAnimation(0, true);
+    playIfChanged("sonic_idle", true);
+}
+
+void Player::playIfChanged(const std::string& name, bool loop) {
+    if (m_lastAnimName == name) return;
+    m_anim.playAnimation(name, loop, m_tuning.animBlendTime);
+    m_lastAnimName = name;
 }
 
 void Player::playAnimation(const std::string& name, bool loop) { m_anim.playAnimation(name, loop); }
@@ -46,26 +51,26 @@ void Player::update(float dt, const InputState& input,
 
     switch (m_state) {
         case MoveState::Ground:
-            // Jump takes priority
             if (input.jump && ground.grounded) {
                 m_state   = MoveState::Airborne;
                 m_vertVel = m_up * m_tuning.jumpPower;
-                // carry full horizontal momentum into air
+                m_airTime = 0.0f;
+                playIfChanged("sonic_ball", true);   // was sonic_jump_A_start
                 updateAirborne(dt, input, camForward, camRight, ground);
                 break;
             }
-            // Enter drift
             if (input.drift && std::fabs(m_speed) > 2.0f) {
                 m_state = MoveState::Drift;
                 updateDrift(dt, input, camForward, camRight, ground);
                 break;
             }
-            // Quickstep
             if ((input.quickLeft || input.quickRight) && m_qsTimer <= 0.0f) {
                 m_state    = MoveState::Quickstep;
                 float side = input.quickLeft ? -1.0f : 1.0f;
                 m_qsTarget = m_pos + m_right * (m_tuning.quickstepDist * side);
                 m_qsTimer  = m_tuning.quickstepTime;
+                m_qsSide   = side;
+                playIfChanged(side < 0.0f ? "sonic_quickstep_L" : "sonic_quickstep_R", false);
             }
             if (m_state == MoveState::Quickstep) {
                 updateQuickstep(dt, ground);
@@ -96,7 +101,7 @@ void Player::update(float dt, const InputState& input,
             break;
     }
 
-    m_anim.update(dt);
+    m_anim.update(dt * m_animPlaybackRate);
 }
 
 // ---------------------------------------------------------------------------
@@ -105,44 +110,33 @@ void Player::update(float dt, const InputState& input,
 void Player::updateGround(float dt, const InputState& in,
                            const glm::vec3& camForward, const glm::vec3& camRight,
                            const GroundSample& ground) {
-    static int frame = 0;
-    frame++;
-
     float stickMag = glm::length(in.stick);
-    std::printf("[F%04d-G] updateGround | stick=(%.3f,%.3f) mag=%.3f speed=%.2f pos=(%.2f,%.2f,%.2f)\n",
-        frame, in.stick.x, in.stick.y, stickMag, m_speed, m_pos.x, m_pos.y, m_pos.z);
 
-    // --- Wish-point steering ---
     glm::vec3 stickWorld = camForward * in.stick.y + camRight * in.stick.x;
     glm::vec3 wishPos = m_pos + stickWorld * m_tuning.lookAheadDist;
     glm::vec3 toWish = wishPos - m_pos;
     toWish -= m_up * glm::dot(toWish, m_up);
 
     if (stickMag > 1e-3f && glm::length2(toWish) > 1e-8f) {
-          glm::vec3 toWishN = glm::normalize(toWish);
-          glm::vec3 fwdFlat = glm::normalize(m_forward - m_up * glm::dot(m_forward, m_up));
+        glm::vec3 toWishN = glm::normalize(toWish);
+        glm::vec3 fwdFlat = glm::normalize(m_forward - m_up * glm::dot(m_forward, m_up));
 
-          float tYaw = std::atan2(toWishN.x, toWishN.z);
-          float cYaw = std::atan2(fwdFlat.x, fwdFlat.z);
-          float diff = wrapAngle(tYaw - cYaw);
+        float tYaw = std::atan2(toWishN.x, toWishN.z);
+        float cYaw = std::atan2(fwdFlat.x, fwdFlat.z);
+        float diff = wrapAngle(tYaw - cYaw);
 
-          float speedT = glm::clamp(std::fabs(m_speed) / m_tuning.maxSpeed, 0.0f, 1.0f);
+        float speedT = glm::clamp(std::fabs(m_speed) / m_tuning.maxSpeed, 0.0f, 1.0f);
 
-          // Non-ground steering: fast = wide arcs, forces drift decision
-          // At low speed: responsive, can turn tight
-          // At high speed: sluggish, drift required for tight turns
-          float responsiveness = std::exp(-2.5f * speedT);
-          float turnRate = glm::mix(m_tuning.turnRateFast, m_tuning.turnRateSlow, responsiveness);
+        float responsiveness = std::exp(-1.7f * speedT); // was -2.5, too sharp a falloff
+        float turnRate = glm::mix(m_tuning.turnRateFast, m_tuning.turnRateSlow, responsiveness);
 
-          // Clamp diff so you can't instantly snap around at high speed
-          float maxDiff = glm::mix(glm::pi<float>() * 0.9f, glm::pi<float>() * 0.25f, speedT);
-          diff = glm::clamp(diff, -maxDiff, maxDiff);
+        float maxDiff = glm::mix(glm::pi<float>() * 0.9f, glm::pi<float>() * 0.33f, speedT); // was 0.25
+        diff = glm::clamp(diff, -maxDiff, maxDiff);
 
-          float step = glm::clamp(diff, -turnRate * dt, turnRate * dt);
-          m_forward = rotateAround(m_forward, m_up, step);
-      }
+        float step = glm::clamp(diff, -turnRate * dt, turnRate * dt);
+        m_forward = rotateAround(m_forward, m_up, step);
+    }
 
-    // --- Accel / decel ---
     float headingDot = 0.0f;
     if (stickMag > 1e-3f) {
         glm::vec3 fwdFlat = glm::normalize(m_forward - m_up * glm::dot(m_forward, m_up));
@@ -150,25 +144,20 @@ void Player::updateGround(float dt, const InputState& in,
         headingDot = glm::dot(fwdFlat, wishFlat);
     }
 
-    float oldSpeed = m_speed;
+    bool braking = false;
     if (stickMag > 0.05f) {
         if (headingDot < -0.25f && m_speed > 1.0f) {
+            braking = true;
             m_speed -= m_tuning.brakeDecel * dt;
-            std::printf("[F%04d-G]   BRAKING | headingDot=%.3f speed %.2f -> %.2f\n",
-                frame, headingDot, oldSpeed, m_speed);
         } else {
             m_speed += m_tuning.accel * stickMag * dt;
-            std::printf("[F%04d-G]   ACCEL | headingDot=%.3f speed %.2f -> %.2f\n",
-                frame, headingDot, oldSpeed, m_speed);
         }
     } else {
         float d = m_tuning.decel * dt;
         m_speed = (m_speed > 0.0f) ? std::max(0.0f, m_speed - d)
                                     : std::min(0.0f, m_speed + d);
-        std::printf("[F%04d-G]   COAST | speed %.2f -> %.2f\n", frame, oldSpeed, m_speed);
     }
 
-    // --- Slope momentum ---
     float downDot = glm::dot(glm::normalize(m_forward), glm::vec3(0, -1, 0));
     if (downDot > 0.0f)
         m_speed += downDot * m_tuning.slopeAccel * dt;
@@ -181,24 +170,34 @@ void Player::updateGround(float dt, const InputState& in,
     glm::vec3 nextPos = m_pos + velocity * dt;
     glm::vec3 newUp = m_up;
 
-    std::printf("[F%04d-G]   pre-resolve | forward=(%.2f,%.2f,%.2f) velocity=(%.2f,%.2f,%.2f) nextPos=(%.2f,%.2f,%.2f)\n",
-        frame, m_forward.x, m_forward.y, m_forward.z,
-        velocity.x, velocity.y, velocity.z,
-        nextPos.x, nextPos.y, nextPos.z);
-
     resolveGround(ground, nextPos, newUp);
 
-    glm::vec3 posBefore = m_pos;
     m_pos = nextPos;
     float easeRate = m_hitWall ? 1e6f : m_tuning.upEase;
     m_up = glm::normalize(glm::mix(m_up, newUp, glm::clamp(easeRate * dt, 0.0f, 1.0f)));
     reorthogonalize();
 
-    std::printf("[F%04d-G]   post-resolve | pos (%.2f,%.2f,%.2f) -> (%.2f,%.2f,%.2f) delta=(%.4f,%.4f,%.4f) hitWall=%d\n",
-        frame, posBefore.x, posBefore.y, posBefore.z,
-        m_pos.x, m_pos.y, m_pos.z,
-        m_pos.x - posBefore.x, m_pos.y - posBefore.y, m_pos.z - posBefore.z,
-        m_hitWall);
+    if (m_landingLockTimer > 0.0f) {
+            m_landingLockTimer -= dt;
+            m_animPlaybackRate = 1.0f;
+        } else if (braking) {
+            playIfChanged("sonic_brake_M_L", false);
+            m_animPlaybackRate = 1.0f;
+        } else {
+            float absSpeed = std::fabs(m_speed);
+            if (absSpeed < 0.3f) {
+                playIfChanged("sonic_idle", true);
+                m_animPlaybackRate = 1.0f;
+            } else {
+                if (absSpeed < 10.0f)      playIfChanged("sonic_walk", true);
+                else if (absSpeed < 20.0f) playIfChanged("sonic_run", true);
+                else                       playIfChanged("sonic_dash", true);
+
+                float speedT = glm::clamp(absSpeed / m_tuning.maxSpeed, 0.0f, 1.0f);
+                float curved = std::pow(speedT, m_tuning.animRateCurve);
+                m_animPlaybackRate = glm::mix(m_tuning.animRateMin, m_tuning.animRateMax, curved);
+            }
+        }
 }
 
 // ---------------------------------------------------------------------------
@@ -207,6 +206,7 @@ void Player::updateGround(float dt, const InputState& in,
 void Player::updateDrift(float dt, const InputState& in,
                           const glm::vec3& camForward, const glm::vec3& camRight,
                           const GroundSample& ground) {
+                              m_animPlaybackRate = 1.0f;
     float stickMag = glm::length(in.stick);
     glm::vec3 stickWorld = camForward * in.stick.y + camRight * in.stick.x;
 
@@ -221,7 +221,7 @@ void Player::updateDrift(float dt, const InputState& in,
             float tYaw = std::atan2(toWishN.x, toWishN.z);
             float cYaw = std::atan2(fwdFlat.x,  fwdFlat.z);
             float diff = wrapAngle(tYaw - cYaw);
-
+playIfChanged(diff < 0.0f ? "sonic_drift_L" : "sonic_drift_R", true);
             // Speed-dependent drift arc: fast = slower turn (bigger swing)
             float speedT   = glm::clamp(std::fabs(m_speed) / m_tuning.maxSpeed, 0.0f, 1.0f);
             float turnRate = glm::mix(m_tuning.driftTurnRateSlow, m_tuning.driftTurnRateFast, speedT);
@@ -255,10 +255,13 @@ void Player::updateDrift(float dt, const InputState& in,
 void Player::updateAirborne(float dt, const InputState& in,
                              const glm::vec3& camForward, const glm::vec3& camRight,
                              const GroundSample& ground) {
-    // Gravity along world down (not surface up - we're in the air)
+    m_airTime += dt;
+    m_animPlaybackRate = 1.0f;
+
+
+
     m_vertVel += glm::vec3(0, -1, 0) * m_tuning.gravity * dt;
 
-    // Air steering: gentle nudge to heading, carries horizontal speed
     float stickMag = glm::length(in.stick);
     if (stickMag > 1e-3f) {
         glm::vec3 stickWorld = camForward * in.stick.y + camRight * in.stick.x;
@@ -276,13 +279,10 @@ void Player::updateAirborne(float dt, const InputState& in,
         }
     }
 
-    // Move: horizontal from m_speed*forward + vertical from vertVel
     glm::vec3 hvel    = m_forward * m_speed;
     glm::vec3 nextPos = m_pos + (hvel + m_vertVel) * dt;
 
-    // Landing check
     if (ground.grounded && m_vertVel.y <= 0.0f) {
-        // Check we're close enough to the ground
         float dist = glm::distance(nextPos, ground.point);
         if (dist < 1.5f || nextPos.y <= ground.point.y) {
             nextPos   = ground.point;
@@ -291,6 +291,8 @@ void Player::updateAirborne(float dt, const InputState& in,
             m_hasPrevNormal = true;
             m_prevNormal    = ground.normal;
             m_state   = MoveState::Ground;
+            m_landingLockTimer = 0.20f;
+            playIfChanged("sonic_landing_A", false);
             reorthogonalize();
             m_pos = nextPos;
             return;
@@ -298,7 +300,6 @@ void Player::updateAirborne(float dt, const InputState& in,
     }
 
     m_pos = nextPos;
-    // Keep up roughly world-up while airborne
     m_up = glm::normalize(glm::mix(m_up, glm::vec3(0,1,0), glm::clamp(3.0f * dt, 0.0f, 1.0f)));
     reorthogonalize();
 }
@@ -307,6 +308,7 @@ void Player::updateAirborne(float dt, const InputState& in,
 // Quickstep: lerp sideways over quickstepTime
 // ---------------------------------------------------------------------------
 void Player::updateQuickstep(float dt, const GroundSample& ground) {
+       m_animPlaybackRate = 1.0f;
     m_qsTimer -= dt;
     float alpha  = 1.0f - glm::clamp(m_qsTimer / m_tuning.quickstepTime, 0.0f, 1.0f);
     glm::vec3 np = glm::mix(m_pos, m_qsTarget, glm::clamp(alpha * 2.0f, 0.0f, 1.0f));
@@ -338,22 +340,13 @@ void Player::resolveGround(const GroundSample& g, glm::vec3& nextPos, glm::vec3&
 
         if (deltaAngle <= threshold) {
             newUp = g.normal;
-
-            // How far above the ground plane are we?
             float heightAbove = glm::dot(nextPos - g.point, g.normal);
 
-            // If heightAbove is near zero, the ground sample is at our old pos.
-            // That means we're moving horizontally - project onto plane, don't snap to point.
             if (heightAbove > 0.1f) {
-                // We're genuinely above the ground, project down onto it
-                nextPos = nextPos - g.normal * heightAbove;
+                nextPos = nextPos - g.normal * (heightAbove - m_tuning.groundClearance);
             } else if (heightAbove < -0.5f) {
-                // We're below ground, snap up
-                nextPos = g.point;
+                nextPos = g.point + g.normal * m_tuning.groundClearance;
             }
-            // else: heightAbove is ~0, we're on the plane already.
-            // nextPos stays as-is (preserves horizontal movement!)
-
         } else {
             m_hitWall = true;
             newUp = m_prevNormal;
@@ -372,7 +365,7 @@ void Player::resolveGround(const GroundSample& g, glm::vec3& nextPos, glm::vec3&
         }
     } else {
         newUp = g.normal;
-        nextPos = g.point;
+        nextPos = g.point + g.normal * m_tuning.groundClearance;
     }
 
     m_prevNormal = g.normal;
@@ -395,7 +388,8 @@ glm::mat4 Player::basis() const {
 }
 
 glm::mat4 Player::modelMatrix() const {
-    return glm::translate(glm::mat4(1.0f), m_pos) * basis();
+    glm::mat4 fix = glm::rotate(glm::mat4(1.0f), m_tuning.modelPitchOffset, glm::vec3(1,0,0));
+    return glm::translate(glm::mat4(1.0f), m_pos) * basis() * fix;
 }
 
 // ---------------------------------------------------------------------------

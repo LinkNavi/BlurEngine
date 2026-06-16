@@ -40,7 +40,9 @@ public:
 
     bool raycast(const glm::vec3& origin, const glm::vec3& dir, float maxDist, CollisionHit& outHit) const;
     bool resolveSphere(glm::vec3& center, float radius, glm::vec3* outNormal = nullptr) const;
-
+    void addTriangles(const std::vector<Vertex>& verts, const std::vector<unsigned int>& indices,
+                       const glm::mat4& transform = glm::mat4(1.0f));
+    void clear();
     bool empty() const { return m_triangles.empty(); }
 
 private:

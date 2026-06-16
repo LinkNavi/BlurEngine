@@ -59,35 +59,37 @@ void EndlessTrack::generateNextChunk() {
     while (prev.arcLength < chunkEndArc) {
         m_distSinceRetarget += m_segmentLength;
         if (m_distSinceRetarget >= kRetargetInterval) {
-            m_yawTarget = (randomFloat() * 2.0f - 1.0f) * kMaxYawCurvature;
-            // PITCH DISABLED: keep flat
-            m_pitchTarget = 0.0f;
+            m_yawTarget   = (randomFloat() * 2.0f - 1.0f) * kMaxYawCurvature;
+            m_pitchTarget = (randomFloat() * 2.0f - 1.0f) * kMaxPitchCurvature;
             m_distSinceRetarget = 0.0f;
         }
-        m_yawCurvature += (m_yawTarget - m_yawCurvature) * kCurvatureSmoothing;
-        // PITCH DISABLED: no pitch smoothing needed but keep for structure
-        m_pitchCurvature = 0.0f;
+        m_yawCurvature   += (m_yawTarget   - m_yawCurvature)   * kCurvatureSmoothing;
+        m_pitchCurvature += (m_pitchTarget - m_pitchCurvature) * kCurvatureSmoothing;
 
-        glm::vec3 tangent = prev.tangent;
-        glm::vec3 up = prev.up;
-        glm::vec3 right = prev.right;
+        m_yawHeading   += m_yawCurvature   * m_segmentLength;
+        m_pitchHeading += m_pitchCurvature * m_segmentLength;
 
-        // Yaw only
-        glm::quat yawRot = glm::angleAxis(m_yawCurvature * m_segmentLength, up);
-        tangent = glm::normalize(yawRot * tangent);
-        right = glm::normalize(glm::cross(up, tangent));
+        // Hard clamp: total turn never gets near 180°, so the track can't
+        // physically curve back on itself into a horizontal loop. Pitch is
+        // capped separately so hills stay climbable instead of looping vertically.
+        m_yawHeading   = glm::clamp(m_yawHeading,   -kMaxYawHeading,   kMaxYawHeading);
+        m_pitchHeading = glm::clamp(m_pitchHeading, -kMaxPitchHeading, kMaxPitchHeading);
 
-        // PITCH DISABLED: skip pitch rotation, keep flat
-        // tangent stays horizontal, up stays world-up-ish
+        glm::vec3 tangent(
+            std::sin(m_yawHeading) * std::cos(m_pitchHeading),
+            std::sin(m_pitchHeading),
+            std::cos(m_yawHeading) * std::cos(m_pitchHeading));
+        tangent = glm::normalize(tangent);
+
+        glm::vec3 worldUp(0, 1, 0);
+        glm::vec3 right = glm::normalize(glm::cross(worldUp, tangent));
+        glm::vec3 up    = glm::normalize(glm::cross(tangent, right));
 
         TrackFrame next;
-        next.position = prev.position + tangent * m_segmentLength;
-        next.position.y = 0.0f; // FORCE FLAT: lock Y to 0
-        next.tangent = tangent;
-        next.tangent.y = 0.0f;   // FORCE FLAT: no vertical component
-        next.tangent = glm::normalize(next.tangent);
-        next.up = glm::vec3(0, 1, 0); // FORCE FLAT: world up
-        next.right = glm::normalize(glm::cross(next.up, next.tangent));
+        next.position  = prev.position + tangent * m_segmentLength;
+        next.tangent   = tangent;
+        next.up        = up;
+        next.right     = right;
         next.arcLength = prev.arcLength + m_segmentLength;
 
         m_nodes.push_back(next);
@@ -104,16 +106,34 @@ void EndlessTrack::generateNextChunk() {
         prev = next;
     }
 
-    Chunk chunk{ blur::Mesh(verts, indices), chunkStartArc, prev.arcLength };
+    Chunk chunk{ blur::Mesh(verts, indices), verts, indices, chunkStartArc, prev.arcLength };
     m_chunks.push_back(std::move(chunk));
+    m_collisionDirty = true;
 }
 
 void EndlessTrack::trim(float playerArcLength, float behindDistance) {
     float cutoff = playerArcLength - behindDistance;
-    while (!m_chunks.empty() && m_chunks.front().endArc < cutoff)
+    bool removed = false;
+    while (!m_chunks.empty() && m_chunks.front().endArc < cutoff) {
         m_chunks.pop_front();
+        removed = true;
+    }
     while (m_nodes.size() > 1 && m_nodes.front().arcLength < cutoff)
         m_nodes.pop_front();
+    if (removed) m_collisionDirty = true;
+}
+
+const blur::CollisionMesh& EndlessTrack::collision() const {
+    if (m_collisionDirty) rebuildCollision();
+    return m_collision;
+}
+
+void EndlessTrack::rebuildCollision() const {
+    m_collision.clear();
+    for (const auto& chunk : m_chunks)
+        m_collision.addTriangles(chunk.verts, chunk.indices);
+    m_collision.finalize();
+    m_collisionDirty = false;
 }
 
 TrackFrame EndlessTrack::sampleFrame(float s) const {

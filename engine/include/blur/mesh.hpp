@@ -72,8 +72,8 @@ class AnimatedModel {
 public:
     explicit AnimatedModel(Model model);
 
-    void playAnimation(const std::string& name, bool loop = true);
-    void playAnimation(int index, bool loop = true);
+    void playAnimation(const std::string& name, bool loop = true, float blendDuration = 0.15f);
+    void playAnimation(int index, bool loop = true, float blendDuration = 0.15f);
     void stopAnimation();
 
     void update(float deltaTime);
@@ -99,6 +99,14 @@ private:
     void applyVertexEdits();
 
     Model m_model;
+
+    int m_previousAnimation = -1;
+    float m_prevAnimTime = 0.0f;
+    bool m_prevLooping = true;
+    float m_blendElapsed = 0.0f;
+    float m_blendDuration = 0.15f;
+    std::vector<glm::mat4> m_prevLocalTransforms;
+    std::vector<glm::mat4> m_blendedLocal;
 
     std::vector<std::vector<Vertex>> m_originalVertices;
     std::vector<std::vector<Vertex>> m_workingVertices;
