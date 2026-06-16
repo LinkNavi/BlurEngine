@@ -17,8 +17,8 @@ Light Speed Dash:
 	Completely converts your mommentum based on ring trail direction
 
 Homing Attack (Aim to make it feel smoother):
-	Triggers Attacking Flag and slightly increase momentum but don't ever lose it
-	Have some enemys you cant kill, for example have the player react by having options like sliding
+	Triggers Attacking Flag and slightly increase momentum but don't ever lose it then go back to orginal momentum on hit, heading towards the direction of momentum
+	Have some enemys you cant kill, for example have the player react by having options like sliding, indicated by a warning !, and the enemys having a unique color
 
 Rolling:
 	Gain speed if going down hill lose speed if not.
@@ -26,7 +26,8 @@ Rolling:
 
 Stomping:
 	Just a reaction and knowlege check.
-	Maybe cancelable into Drop Dash
+	Maybe cancelable into Drop Dash with speed depending on horizontal momentum to avoid spamming
+	Bounces if you hold it
 
 2D Sections (Think Generations): 
 	Bounding Box based trigger system
@@ -36,6 +37,7 @@ Stomping:
 Style System:
 	Scales the top speed by style ranks
 	Gain Style by killing enemys and dodging without losing momentum, if you stop to kill shit thats lame
+	Purely a reward, you dont lose anything if you dont have it
 
 Rails:
 	More or less just transitions
@@ -52,3 +54,6 @@ Enemys:
 	Just cus you go fast doesnt mean ur safe (issue i noted in generations)
 	In generations/unleashed if you had boost enemys werent shit
 	Make Enemys A Part Of The Stage (Secret Paths if you homing attack in a certain Direction)
+
+
+or im thnking this, since its game pad controlled, we have the joy stick pos basically be a wish positions, like if its tilted it forward then the wish pos is a few units a head of sonic, then we have sonic curve left and right based on the on wish pos, kinda like a car, then to have him tilt we calcuate the up by predicting sonic's path then checking if he'd hit a curved wall with a threshhold

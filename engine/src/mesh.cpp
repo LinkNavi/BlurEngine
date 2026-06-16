@@ -9,24 +9,16 @@
 #include <glm/gtc/quaternion.hpp>
 
 #include <cstdio>
+#include <cmath>
+#include <unordered_map>
 
 namespace blur {
 
-Mesh::Mesh(const std::vector<Vertex>& vertices, const std::vector<unsigned int>& indices) {
-    m_indexCount = (unsigned int)indices.size();
+// ---------------------------------------------------------------------------
+// Mesh
+// ---------------------------------------------------------------------------
 
-    glGenVertexArrays(1, &m_vao);
-    glGenBuffers(1, &m_vbo);
-    glGenBuffers(1, &m_ebo);
-
-    glBindVertexArray(m_vao);
-
-    glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
-    glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(Vertex), vertices.data(), GL_STATIC_DRAW);
-
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_ebo);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(unsigned int), indices.data(), GL_STATIC_DRAW);
-
+static void setupVertexAttribs() {
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, position));
 
@@ -36,13 +28,64 @@ Mesh::Mesh(const std::vector<Vertex>& vertices, const std::vector<unsigned int>&
     glEnableVertexAttribArray(2);
     glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, uv));
 
+    glEnableVertexAttribArray(3);
+    glVertexAttribIPointer(3, 4, GL_INT, sizeof(Vertex), (void*)offsetof(Vertex, joints));
+
+    glEnableVertexAttribArray(4);
+    glVertexAttribPointer(4, 4, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, weights));
+}
+
+Mesh::Mesh(const std::vector<Vertex>& vertices, const std::vector<unsigned int>& indices) {
+    m_indexCount = (unsigned int)indices.size();
+    m_vertexCount = vertices.size();
+
+    glGenVertexArrays(1, &m_vao);
+    glGenBuffers(1, &m_vbo);
+    glGenBuffers(1, &m_ebo);
+
+    glBindVertexArray(m_vao);
+
+    glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
+    glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(Vertex), vertices.data(), GL_DYNAMIC_DRAW);
+
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_ebo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(unsigned int), indices.data(), GL_STATIC_DRAW);
+
+    setupVertexAttribs();
+
     glBindVertexArray(0);
 }
 
 Mesh::~Mesh() {
-    glDeleteVertexArrays(1, &m_vao);
-    glDeleteBuffers(1, &m_vbo);
-    glDeleteBuffers(1, &m_ebo);
+    if (m_vao) glDeleteVertexArrays(1, &m_vao);
+    if (m_vbo) glDeleteBuffers(1, &m_vbo);
+    if (m_ebo) glDeleteBuffers(1, &m_ebo);
+}
+
+Mesh::Mesh(Mesh&& other) noexcept
+    : transform(other.transform), isSkinned(other.isSkinned),
+      m_vao(other.m_vao), m_vbo(other.m_vbo), m_ebo(other.m_ebo),
+      m_indexCount(other.m_indexCount), m_vertexCount(other.m_vertexCount) {
+    other.m_vao = other.m_vbo = other.m_ebo = 0;
+}
+
+Mesh& Mesh::operator=(Mesh&& other) noexcept {
+    if (this != &other) {
+        if (m_vao) glDeleteVertexArrays(1, &m_vao);
+        if (m_vbo) glDeleteBuffers(1, &m_vbo);
+        if (m_ebo) glDeleteBuffers(1, &m_ebo);
+
+        transform = other.transform;
+        isSkinned = other.isSkinned;
+        m_vao = other.m_vao;
+        m_vbo = other.m_vbo;
+        m_ebo = other.m_ebo;
+        m_indexCount = other.m_indexCount;
+        m_vertexCount = other.m_vertexCount;
+
+        other.m_vao = other.m_vbo = other.m_ebo = 0;
+    }
+    return *this;
 }
 
 void Mesh::draw() const {
@@ -51,9 +94,31 @@ void Mesh::draw() const {
     glBindVertexArray(0);
 }
 
-static void loadNode(cgltf_node* node, const glm::mat4& parentTransform, std::vector<Mesh>& outMeshes);
+void Mesh::updateVertices(const std::vector<Vertex>& vertices) {
+    if (vertices.size() != m_vertexCount) {
+        std::fprintf(stderr, "Mesh::updateVertices: vertex count mismatch (%zu vs %zu)\n",
+            vertices.size(), m_vertexCount);
+        return;
+    }
+    glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, vertices.size() * sizeof(Vertex), vertices.data());
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+}
 
-static glm::mat4 nodeLocalTransform(cgltf_node* node) {
+// ---------------------------------------------------------------------------
+// glTF loading
+// ---------------------------------------------------------------------------
+
+namespace {
+
+struct LoadedMeshData {
+    std::vector<Vertex> vertices;
+    std::vector<unsigned int> indices;
+    glm::mat4 transform;
+    bool isSkinned;
+};
+
+glm::mat4 nodeLocalTransform(cgltf_node* node) {
     glm::mat4 m(1.0f);
     if (node->has_matrix) {
         for (int c = 0; c < 4; c++)
@@ -76,72 +141,254 @@ static glm::mat4 nodeLocalTransform(cgltf_node* node) {
     return m;
 }
 
-static void loadMesh(cgltf_mesh* mesh, const glm::mat4& transform, std::vector<Mesh>& outMeshes) {
+void loadMeshPrimitives(cgltf_data* data, cgltf_node* node, cgltf_mesh* mesh,
+                         const glm::mat4& transform, std::vector<LoadedMeshData>& outMeshes) {
+    cgltf_skin* skin = node->skin;
+
+    // Map cgltf_node* -> index in skin->joints, used to remap JOINTS_n indices
+    // (which are indices into skin->joints) directly - they already are, so
+    // no remap needed; we just need joint count for bounds checking.
+    size_t jointCount = skin ? skin->joints_count : 0;
+
     for (size_t p = 0; p < mesh->primitives_count; p++) {
         cgltf_primitive* prim = &mesh->primitives[p];
         if (prim->type != cgltf_primitive_type_triangles)
             continue;
 
-        std::vector<Vertex> vertices;
-        std::vector<unsigned int> indices;
-
         cgltf_accessor* posAcc = nullptr;
         cgltf_accessor* normAcc = nullptr;
         cgltf_accessor* uvAcc = nullptr;
+        cgltf_accessor* jointsAcc = nullptr;
+        cgltf_accessor* weightsAcc = nullptr;
 
         for (size_t a = 0; a < prim->attributes_count; a++) {
             cgltf_attribute* attr = &prim->attributes[a];
-            if (attr->type == cgltf_attribute_type_position) posAcc = attr->data;
-            else if (attr->type == cgltf_attribute_type_normal) normAcc = attr->data;
-            else if (attr->type == cgltf_attribute_type_texcoord && attr->index == 0) uvAcc = attr->data;
+            switch (attr->type) {
+                case cgltf_attribute_type_position: posAcc = attr->data; break;
+                case cgltf_attribute_type_normal: normAcc = attr->data; break;
+                case cgltf_attribute_type_texcoord:
+                    if (attr->index == 0) uvAcc = attr->data;
+                    break;
+                case cgltf_attribute_type_joints:
+                    if (attr->index == 0) jointsAcc = attr->data;
+                    break;
+                case cgltf_attribute_type_weights:
+                    if (attr->index == 0) weightsAcc = attr->data;
+                    break;
+                default: break;
+            }
         }
 
         if (!posAcc) continue;
 
+        LoadedMeshData md;
+        md.transform = transform;
+        md.isSkinned = (jointsAcc != nullptr && weightsAcc != nullptr && skin != nullptr);
+
         size_t vertCount = posAcc->count;
-        vertices.resize(vertCount);
+        md.vertices.resize(vertCount);
 
         for (size_t i = 0; i < vertCount; i++) {
-            cgltf_accessor_read_float(posAcc, i, &vertices[i].position.x, 3);
+            Vertex& v = md.vertices[i];
+
+            cgltf_accessor_read_float(posAcc, i, &v.position.x, 3);
 
             if (normAcc)
-                cgltf_accessor_read_float(normAcc, i, &vertices[i].normal.x, 3);
+                cgltf_accessor_read_float(normAcc, i, &v.normal.x, 3);
             else
-                vertices[i].normal = glm::vec3(0, 1, 0);
+                v.normal = glm::vec3(0, 1, 0);
 
             if (uvAcc)
-                cgltf_accessor_read_float(uvAcc, i, &vertices[i].uv.x, 2);
+                cgltf_accessor_read_float(uvAcc, i, &v.uv.x, 2);
             else
-                vertices[i].uv = glm::vec2(0.0f);
+                v.uv = glm::vec2(0.0f);
+
+            if (md.isSkinned) {
+                cgltf_uint joints[4] = {0, 0, 0, 0};
+                cgltf_accessor_read_uint(jointsAcc, i, joints, 4);
+
+                float weights[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+                cgltf_accessor_read_float(weightsAcc, i, weights, 4);
+
+                for (int k = 0; k < 4; k++) {
+                    v.joints[k] = (joints[k] < jointCount) ? (int)joints[k] : 0;
+                }
+                v.weights = glm::vec4(weights[0], weights[1], weights[2], weights[3]);
+
+                // Normalize weights defensively (some exporters don't sum to 1).
+                float wsum = v.weights.x + v.weights.y + v.weights.z + v.weights.w;
+                if (wsum > 1e-6f) v.weights /= wsum;
+            } else {
+                v.joints = glm::ivec4(0);
+                v.weights = glm::vec4(1.0f, 0.0f, 0.0f, 0.0f);
+            }
         }
 
         if (prim->indices) {
-            indices.resize(prim->indices->count);
+            md.indices.resize(prim->indices->count);
             for (size_t i = 0; i < prim->indices->count; i++)
-                indices[i] = (unsigned int)cgltf_accessor_read_index(prim->indices, i);
+                md.indices[i] = (unsigned int)cgltf_accessor_read_index(prim->indices, i);
         } else {
-            indices.resize(vertCount);
+            md.indices.resize(vertCount);
             for (size_t i = 0; i < vertCount; i++)
-                indices[i] = (unsigned int)i;
+                md.indices[i] = (unsigned int)i;
         }
 
-        Mesh m(vertices, indices);
-        m.transform = transform;
-        outMeshes.push_back(std::move(m));
+        outMeshes.push_back(std::move(md));
     }
 }
 
-static void loadNode(cgltf_node* node, const glm::mat4& parentTransform, std::vector<Mesh>& outMeshes) {
+void walkNode(cgltf_data* data, cgltf_node* node, const glm::mat4& parentTransform,
+              std::vector<LoadedMeshData>& outMeshes) {
     glm::mat4 worldTransform = parentTransform * nodeLocalTransform(node);
 
     if (node->mesh)
-        loadMesh(node->mesh, worldTransform, outMeshes);
+        loadMeshPrimitives(data, node, node->mesh, worldTransform, outMeshes);
 
     for (size_t i = 0; i < node->children_count; i++)
-        loadNode(node->children[i], worldTransform, outMeshes);
+        walkNode(data, node->children[i], worldTransform, outMeshes);
 }
 
-bool loadGltf(const std::string& path, std::vector<Mesh>& outMeshes) {
+// Builds a Skeleton from the first skin found in the file (most character
+// rigs only have one). Returns a map from cgltf_node* -> bone index for use
+// when parsing animation channels.
+bool buildSkeleton(cgltf_data* data, Skeleton& outSkeleton,
+                    std::unordered_map<cgltf_node*, int>& outNodeToBone) {
+    if (data->skins_count == 0) return false;
+
+    cgltf_skin* skin = &data->skins[0];
+    outSkeleton.bones.resize(skin->joints_count);
+
+    for (size_t i = 0; i < skin->joints_count; i++) {
+        cgltf_node* jointNode = skin->joints[i];
+        outNodeToBone[jointNode] = (int)i;
+    }
+
+    for (size_t i = 0; i < skin->joints_count; i++) {
+        cgltf_node* jointNode = skin->joints[i];
+        Bone& bone = outSkeleton.bones[i];
+
+        bone.name = jointNode->name ? jointNode->name : ("bone_" + std::to_string(i));
+
+        // Parent index: find jointNode->parent in the joint list (if it's
+        // part of the skin); if the parent isn't a skinned joint, treat this
+        // as a root bone for animation purposes (parentIndex stays -1).
+        bone.parentIndex = -1;
+        if (jointNode->parent) {
+            auto it = outNodeToBone.find(jointNode->parent);
+            if (it != outNodeToBone.end())
+                bone.parentIndex = it->second;
+        }
+
+        if (jointNode->has_translation)
+            bone.bindTranslation = glm::vec3(jointNode->translation[0], jointNode->translation[1], jointNode->translation[2]);
+        if (jointNode->has_rotation)
+            bone.bindRotation = glm::quat(jointNode->rotation[3], jointNode->rotation[0], jointNode->rotation[1], jointNode->rotation[2]);
+        if (jointNode->has_scale)
+            bone.bindScale = glm::vec3(jointNode->scale[0], jointNode->scale[1], jointNode->scale[2]);
+
+        if (skin->inverse_bind_matrices) {
+            float m[16];
+            cgltf_accessor_read_float(skin->inverse_bind_matrices, i, m, 16);
+            glm::mat4 ibm;
+            for (int c = 0; c < 4; c++)
+                for (int r = 0; r < 4; r++)
+                    ibm[c][r] = m[c * 4 + r];
+            bone.inverseBindMatrix = ibm;
+        }
+    }
+
+    return true;
+}
+
+void buildAnimations(cgltf_data* data, std::unordered_map<cgltf_node*, int>& nodeToBone,
+                      std::vector<Animation>& outAnimations) {
+    outAnimations.reserve(data->animations_count);
+
+    for (size_t a = 0; a < data->animations_count; a++) {
+        cgltf_animation* srcAnim = &data->animations[a];
+
+        Animation anim;
+        anim.name = srcAnim->name ? srcAnim->name : ("anim_" + std::to_string(a));
+
+        // Group channels by target bone so each bone gets one BoneTrack.
+        std::unordered_map<int, BoneTrack> tracksByBone;
+
+        for (size_t c = 0; c < srcAnim->channels_count; c++) {
+            cgltf_animation_channel* channel = &srcAnim->channels[c];
+            if (!channel->target_node) continue;
+
+            auto boneIt = nodeToBone.find(channel->target_node);
+            if (boneIt == nodeToBone.end()) continue; // not a skinned joint, skip
+
+            int boneIndex = boneIt->second;
+            BoneTrack& track = tracksByBone[boneIndex];
+            track.boneIndex = boneIndex;
+
+            cgltf_animation_sampler* sampler = channel->sampler;
+            cgltf_accessor* timeAcc = sampler->input;
+            cgltf_accessor* valueAcc = sampler->output;
+
+            size_t keyCount = timeAcc->count;
+
+            std::vector<float> times(keyCount);
+            for (size_t k = 0; k < keyCount; k++) {
+                float t;
+                cgltf_accessor_read_float(timeAcc, k, &t, 1);
+                times[k] = t;
+            }
+
+            float maxTime = times.empty() ? 0.0f : times.back();
+            anim.duration = std::max(anim.duration, maxTime);
+
+            switch (channel->target_path) {
+                case cgltf_animation_path_type_translation: {
+                    track.translationTimes = times;
+                    track.translations.resize(keyCount);
+                    for (size_t k = 0; k < keyCount; k++) {
+                        float v[3];
+                        cgltf_accessor_read_float(valueAcc, k, v, 3);
+                        track.translations[k] = glm::vec3(v[0], v[1], v[2]);
+                    }
+                    break;
+                }
+                case cgltf_animation_path_type_rotation: {
+                    track.rotationTimes = times;
+                    track.rotations.resize(keyCount);
+                    for (size_t k = 0; k < keyCount; k++) {
+                        float v[4];
+                        cgltf_accessor_read_float(valueAcc, k, v, 4);
+                        // glTF stores quats as (x,y,z,w); glm::quat ctor wants (w,x,y,z)
+                        track.rotations[k] = glm::quat(v[3], v[0], v[1], v[2]);
+                    }
+                    break;
+                }
+                case cgltf_animation_path_type_scale: {
+                    track.scaleTimes = times;
+                    track.scales.resize(keyCount);
+                    for (size_t k = 0; k < keyCount; k++) {
+                        float v[3];
+                        cgltf_accessor_read_float(valueAcc, k, v, 3);
+                        track.scales[k] = glm::vec3(v[0], v[1], v[2]);
+                    }
+                    break;
+                }
+                default:
+                    break; // weights (morph targets) not handled here
+            }
+        }
+
+        anim.tracks.reserve(tracksByBone.size());
+        for (auto& kv : tracksByBone)
+            anim.tracks.push_back(std::move(kv.second));
+
+        outAnimations.push_back(std::move(anim));
+    }
+}
+
+} // namespace
+
+bool loadModel(const std::string& path, Model& outModel) {
     cgltf_options options = {};
     cgltf_data* data = nullptr;
 
@@ -158,14 +405,148 @@ bool loadGltf(const std::string& path, std::vector<Mesh>& outMeshes) {
         return false;
     }
 
+    std::unordered_map<cgltf_node*, int> nodeToBone;
+    bool hasSkin = buildSkeleton(data, outModel.skeleton, nodeToBone);
+
+    if (hasSkin) {
+        buildAnimations(data, nodeToBone, outModel.animations);
+    }
+
+    std::vector<LoadedMeshData> loaded;
     for (size_t s = 0; s < data->scenes_count; s++) {
         cgltf_scene* scene = &data->scenes[s];
         for (size_t n = 0; n < scene->nodes_count; n++)
-            loadNode(scene->nodes[n], glm::mat4(1.0f), outMeshes);
+            walkNode(data, scene->nodes[n], glm::mat4(1.0f), loaded);
     }
 
     cgltf_free(data);
+
+    outModel.meshes.reserve(loaded.size());
+    outModel.meshVertices.reserve(loaded.size());
+    for (auto& md : loaded) {
+        Mesh mesh(md.vertices, md.indices);
+        mesh.transform = md.transform;
+        mesh.isSkinned = md.isSkinned;
+        outModel.meshVertices.push_back(md.vertices); // keep CPU copy before move
+        outModel.meshes.push_back(std::move(mesh));
+    }
+
     return true;
+}
+
+bool loadGltf(const std::string& path, std::vector<Mesh>& outMeshes) {
+    Model model;
+    if (!loadModel(path, model)) return false;
+    outMeshes = std::move(model.meshes);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// AnimatedModel
+// ---------------------------------------------------------------------------
+
+AnimatedModel::AnimatedModel(Model model) : m_model(std::move(model)) {
+    if (hasSkeleton()) {
+        m_localTransforms.resize(m_model.skeleton.bones.size());
+        m_skinningMatrices.resize(m_model.skeleton.bones.size(), glm::mat4(1.0f));
+    }
+
+    // Keep an original (bind-pose) copy and a working copy per mesh, so
+    // wobble/custom edits always deform from a clean base each frame.
+    m_originalVertices = m_model.meshVertices;
+    m_workingVertices = m_model.meshVertices;
+}
+
+void AnimatedModel::playAnimation(const std::string& name, bool loop) {
+    int idx = m_model.findAnimation(name);
+    if (idx < 0) {
+        std::fprintf(stderr, "AnimatedModel: animation '%s' not found\n", name.c_str());
+        return;
+    }
+    playAnimation(idx, loop);
+}
+
+void AnimatedModel::playAnimation(int index, bool loop) {
+    if (index < 0 || index >= (int)m_model.animations.size()) return;
+    m_currentAnimation = index;
+    m_animTime = 0.0f;
+    m_looping = loop;
+}
+
+void AnimatedModel::stopAnimation() {
+    m_currentAnimation = -1;
+}
+
+void AnimatedModel::update(float deltaTime) {
+    m_wobbleTime += deltaTime;
+
+    if (m_currentAnimation >= 0 && hasSkeleton()) {
+        const Animation& anim = m_model.animations[m_currentAnimation];
+        m_animTime += deltaTime;
+
+        if (anim.duration > 0.0f) {
+            if (m_looping) {
+                m_animTime = std::fmod(m_animTime, anim.duration);
+            } else if (m_animTime > anim.duration) {
+                m_animTime = anim.duration;
+            }
+        }
+
+        anim.sample(m_animTime, m_model.skeleton, m_localTransforms);
+        computeSkinningMatrices(m_model.skeleton, m_localTransforms, m_skinningMatrices);
+    }
+
+    if (m_wobbleEnabled || m_customEditFn) {
+        applyVertexEdits();
+    }
+}
+
+void AnimatedModel::applyVertexEdits() {
+    for (size_t m = 0; m < m_model.meshes.size(); m++) {
+        if (m >= m_originalVertices.size() || m >= m_workingVertices.size()) continue;
+
+        const auto& original = m_originalVertices[m];
+        auto& working = m_workingVertices[m];
+
+        if (m_customEditFn) {
+            m_customEditFn(original, working, m_wobbleTime, m_customEditUserData);
+        } else if (m_wobbleEnabled) {
+            for (size_t i = 0; i < original.size(); i++) {
+                const Vertex& src = original[i];
+                Vertex& dst = working[i];
+                dst = src;
+
+                // Simple per-vertex sine wobble, phase-shifted by position so
+                // it ripples rather than moving everything in lockstep.
+                float phase = src.position.x * 2.0f + src.position.y * 1.3f;
+                float offset = std::sin(m_wobbleTime * m_wobbleFrequency + phase) * m_wobbleAmplitude;
+                dst.position += src.normal * offset;
+            }
+        } else {
+            continue; // nothing to do for this mesh
+        }
+
+        m_model.meshes[m].updateVertices(working);
+    }
+}
+
+void AnimatedModel::draw() const {
+    for (auto& mesh : m_model.meshes) {
+        mesh.draw();
+    }
+}
+
+void AnimatedModel::setWobble(bool enabled, float amplitude, float frequency) {
+    m_wobbleEnabled = enabled;
+    m_wobbleAmplitude = amplitude;
+    m_wobbleFrequency = frequency;
+    m_customEditFn = nullptr;
+}
+
+void AnimatedModel::setCustomVertexEditor(VertexEditFn fn, void* userData) {
+    m_customEditFn = fn;
+    m_customEditUserData = userData;
+    m_wobbleEnabled = false;
 }
 
 } // namespace blur
