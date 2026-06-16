@@ -1,5 +1,6 @@
 game_sources = files(
   'src/main.cpp',
+  'src/player.cpp',
   'src/debug/noise.cpp',
   'src/debug/track.cpp',
 )

@@ -60,31 +60,34 @@ void EndlessTrack::generateNextChunk() {
         m_distSinceRetarget += m_segmentLength;
         if (m_distSinceRetarget >= kRetargetInterval) {
             m_yawTarget = (randomFloat() * 2.0f - 1.0f) * kMaxYawCurvature;
-            m_pitchTarget = (randomFloat() * 2.0f - 1.0f) * kMaxPitchCurvature;
+            // PITCH DISABLED: keep flat
+            m_pitchTarget = 0.0f;
             m_distSinceRetarget = 0.0f;
         }
         m_yawCurvature += (m_yawTarget - m_yawCurvature) * kCurvatureSmoothing;
-        m_pitchCurvature += (m_pitchTarget - m_pitchCurvature) * kCurvatureSmoothing;
+        // PITCH DISABLED: no pitch smoothing needed but keep for structure
+        m_pitchCurvature = 0.0f;
 
         glm::vec3 tangent = prev.tangent;
         glm::vec3 up = prev.up;
         glm::vec3 right = prev.right;
 
+        // Yaw only
         glm::quat yawRot = glm::angleAxis(m_yawCurvature * m_segmentLength, up);
         tangent = glm::normalize(yawRot * tangent);
         right = glm::normalize(glm::cross(up, tangent));
 
-        glm::quat pitchRot = glm::angleAxis(m_pitchCurvature * m_segmentLength, right);
-        tangent = glm::normalize(pitchRot * tangent);
-        up = glm::normalize(pitchRot * up);
-        right = glm::normalize(glm::cross(up, tangent));
-        up = glm::normalize(glm::cross(tangent, right));
+        // PITCH DISABLED: skip pitch rotation, keep flat
+        // tangent stays horizontal, up stays world-up-ish
 
         TrackFrame next;
         next.position = prev.position + tangent * m_segmentLength;
+        next.position.y = 0.0f; // FORCE FLAT: lock Y to 0
         next.tangent = tangent;
-        next.up = up;
-        next.right = right;
+        next.tangent.y = 0.0f;   // FORCE FLAT: no vertical component
+        next.tangent = glm::normalize(next.tangent);
+        next.up = glm::vec3(0, 1, 0); // FORCE FLAT: world up
+        next.right = glm::normalize(glm::cross(next.up, next.tangent));
         next.arcLength = prev.arcLength + m_segmentLength;
 
         m_nodes.push_back(next);
