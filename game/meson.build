@@ -1,5 +1,7 @@
 game_sources = files(
   'src/main.cpp',
+  'src/debug/noise.cpp',
+  'src/debug/track.cpp',
 )
 
 executable('blur',

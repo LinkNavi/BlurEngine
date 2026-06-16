@@ -4,6 +4,8 @@ engine_sources = files(
   'src/shader.cpp',
   'src/mesh.cpp',
   'src/skeleton.cpp',
+  'src/texture.cpp',
+  'src/collision.cpp',
 )
 
 engine_inc = include_directories('include')
