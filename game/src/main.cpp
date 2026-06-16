@@ -17,11 +17,14 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtc/quaternion.hpp>
+#include <glm/gtc/constants.hpp>
 #include <glm/gtx/quaternion.hpp>
 #include <vector>
 #include <string>
 #include <cstdio>
 #include <cstdlib>
+#include <algorithm>
+#include <cmath>
 
 static const char* kVertSrc = R"(
 #version 460 core
@@ -89,6 +92,43 @@ void main() {
     FragColor = vec4(base * light, 1.0);
 }
 )";
+
+namespace {
+
+// ---------------------------------------------------------------------------
+// Player movement tuning
+// ---------------------------------------------------------------------------
+// Car-like steering model: the stick doesn't set velocity directly. Instead
+// it picks a "wish point" a fixed look-ahead distance in front of Sonic
+// (in camera space), and Sonic curves his forward vector toward that point
+// at a turn rate that depends on current speed (tighter turns at low speed,
+// wider sweeping arcs at high speed - same reason cars understeer at speed).
+// Forward speed itself is a separate scalar with its own accel/decel/brake,
+// so stopping and turning are independent like a platformer, not a strafe.
+struct MoveTuning {
+    float lookAheadDist   = 4.0f;   // how far ahead the wish point sits
+    float maxSpeed         = 16.0f;  // top ground speed
+    float accel             = 22.0f;  // speed gain per second when holding a direction
+    float decel             = 14.0f;  // speed loss per second when stick is neutral
+    float brakeDecel        = 36.0f;  // speed loss per second when steering hard against current motion
+    float minTurnRate       = 5.5f;   // rad/s turn rate at zero speed (sharp pivot)
+    float maxTurnRate       = 1.1f;   // rad/s turn rate at max speed (wide arc)
+    float slopeAccelScale   = 6.0f;   // extra accel per second from downhill grade
+    float wallTiltBase      = 0.62f;  // rad (~35.5deg) max normal-change tolerated at zero speed
+    float wallTiltPerSpeed  = 0.022f; // extra rad of tolerance per unit of speed
+    float wallTiltMax       = 1.25f;  // rad (~71.6deg) absolute cap regardless of speed
+    float upEase            = 10.0f;  // how fast currentUp eases toward target up
+};
+
+constexpr MoveTuning kTune;
+
+float wrapAngle(float a) {
+    while (a > glm::pi<float>()) a -= glm::two_pi<float>();
+    while (a < -glm::pi<float>()) a += glm::two_pi<float>();
+    return a;
+}
+
+} // namespace
 
 int main(int argc, char** argv) {
     if (!SDL_Init(SDL_INIT_GAMEPAD)) {
@@ -161,11 +201,15 @@ int main(int argc, char** argv) {
     glm::vec3 currentUp(0.0f, 1.0f, 0.0f);
     glm::vec3 forward(0.0f, 0.0f, 1.0f);
     glm::vec3 right(1.0f, 0.0f, 0.0f);
+    float speed = 0.0f; // signed scalar along `forward`
 
+    // Tracks where we are along the debug track so closestArcLength has a
+    // cheap hint to search from instead of scanning every node every frame.
     float playerArc = 0.0f;
-    float lateralOffset = 0.0f;
-    const float forwardSpeed = 10.0f;
-    const float steerSpeed = 6.0f;
+
+    // Camera yaw trails the player's facing instead of being locked to a
+    // track frame or world axis, so it settles in behind Sonic as he turns.
+    float camYaw = 0.0f;
 
     if (!debugMode) playerPos = glm::vec3(0.0f, 1.0f, 0.0f);
 
@@ -175,6 +219,7 @@ int main(int argc, char** argv) {
         double now = glfwGetTime();
         float dt = (float)(now - lastTime);
         lastTime = now;
+        dt = glm::clamp(dt, 0.0f, 1.0f / 30.0f); // avoid huge steps on hitches
 
         window.pollEvents();
         SDL_PumpEvents();
@@ -187,46 +232,171 @@ int main(int argc, char** argv) {
         } else {
             window.setWindowTitle("Blur Engine - No gamepad detected");
         }
+        float stickMag = glm::length(stick);
 
         if (debugMode) {
-            playerArc += forwardSpeed * dt;
-            lateralOffset += stick.x * steerSpeed * dt;
-
-            float halfWidth = track.width() * 0.5f - 0.6f;
-            lateralOffset = glm::clamp(lateralOffset, -halfWidth, halfWidth);
-
             track.update(playerArc, 120.0f);
             track.trim(playerArc, 60.0f);
+        }
 
-            debugmode::TrackFrame frame = track.sampleFrame(playerArc);
-            playerPos = frame.position + frame.right * lateralOffset;
-            currentUp = frame.up;
-            forward = frame.tangent;
-            right = frame.right;
+        // --- Wish position: camera-relative point a few units ahead -------
+        glm::vec3 camForward = glm::normalize(glm::vec3(std::sin(camYaw), 0.0f, std::cos(camYaw)));
+        glm::vec3 camRight = glm::normalize(glm::cross(currentUp, camForward));
+        glm::vec3 stickDirWorld = camForward * stick.y + camRight * stick.x;
+
+        glm::vec3 wishPos = playerPos + stickDirWorld * kTune.lookAheadDist;
+
+        // --- Steering: curve `forward` toward the wish point, car-style ----
+        glm::vec3 toWish = wishPos - playerPos;
+        toWish -= currentUp * glm::dot(toWish, currentUp); // project onto ground plane
+
+        if (stickMag > 1e-3f && glm::length(toWish) > 1e-4f) {
+            glm::vec3 toWishN = glm::normalize(toWish);
+            glm::vec3 fwdFlat = glm::normalize(forward - currentUp * glm::dot(forward, currentUp));
+
+            float targetYaw = std::atan2(toWishN.x, toWishN.z);
+            float curYaw = std::atan2(fwdFlat.x, fwdFlat.z);
+            float diff = wrapAngle(targetYaw - curYaw);
+
+            // Faster = wider arcs (lower turn rate), like understeer.
+            float speedT = glm::clamp(std::fabs(speed) / kTune.maxSpeed, 0.0f, 1.0f);
+            float turnRate = glm::mix(kTune.minTurnRate, kTune.maxTurnRate, speedT);
+
+            float maxStep = turnRate * dt;
+            float step = glm::clamp(diff, -maxStep, maxStep);
+            float newYaw = curYaw + step;
+            forward = glm::vec3(std::sin(newYaw), 0.0f, std::cos(newYaw));
+        }
+
+        // --- Accel / decel / brake -----------------------------------------
+        // Braking kicks in when the stick wants a direction that's mostly
+        // opposite our current heading - otherwise turning sharply while
+        // fast would never feel like it costs you speed.
+        float headingDot = 0.0f;
+        if (stickMag > 1e-3f) {
+            glm::vec3 fwdFlat = glm::normalize(forward - currentUp * glm::dot(forward, currentUp));
+            glm::vec3 wishFlat = glm::normalize(stickDirWorld - currentUp * glm::dot(stickDirWorld, currentUp));
+            headingDot = glm::dot(fwdFlat, wishFlat);
+        }
+
+        if (stickMag > 0.05f) {
+            if (headingDot < -0.3f && speed > 1.0f) {
+                speed -= kTune.brakeDecel * dt;
+            } else {
+                speed += kTune.accel * stickMag * dt;
+            }
         } else {
-            playerPos.x += stick.x * forwardSpeed * dt;
-            playerPos.z += stick.y * forwardSpeed * dt;
+            float decel = kTune.decel * dt;
+            speed = (speed > 0.0f) ? std::max(0.0f, speed - decel)
+                                    : std::min(0.0f, speed + decel);
+        }
+        speed = glm::clamp(speed, -kTune.maxSpeed * 0.5f, kTune.maxSpeed);
 
-            if (worldLoaded && !worldCollision.empty()) {
-                blur::CollisionHit hit;
-                glm::vec3 probeOrigin = playerPos + currentUp * 5.0f;
-                if (worldCollision.raycast(probeOrigin, -currentUp, 50.0f, hit)) {
-                    playerPos = hit.point;
-                    glm::vec3 from = glm::normalize(currentUp);
-                    glm::vec3 to = glm::normalize(hit.normal);
-                    if (glm::dot(from, to) < 0.9999f) {
-                        float t = glm::clamp(10.0f * dt, 0.0f, 1.0f);
-                        glm::quat rot = glm::rotation(from, to);
-                        currentUp = glm::normalize(glm::slerp(glm::quat(1, 0, 0, 0), rot, t) * from);
+        // --- Slope assist: gain speed downhill, lose it uphill --------------
+        glm::vec3 fwdFlatForSlope = forward - currentUp * glm::dot(forward, currentUp);
+        if (glm::length(fwdFlatForSlope) > 1e-5f) {
+            // forward.y relative to currentUp tells us the grade; using the
+            // raw world-space tilt of forward vs up is enough for a debug feel.
+            float grade = glm::dot(glm::normalize(forward), glm::vec3(0, -1, 0)); // >0 means pointing downhill
+            speed += grade * kTune.slopeAccelScale * dt;
+            speed = glm::clamp(speed, -kTune.maxSpeed * 0.5f, kTune.maxSpeed);
+        }
+
+        glm::vec3 velocity = forward * speed;
+        glm::vec3 nextPos = playerPos + velocity * dt;
+
+        // --- Predictive tilt check: would committing to this path's wall ---
+        // angle exceed our threshold? If so, treat it like hitting a wall
+        // (kill the curve-up, just stop gaining tilt) instead of driving up
+        // it. Threshold scales with speed so fast Sonic can commit to banks
+        // that would just be a wall at a standstill.
+        glm::vec3 targetUp = currentUp;
+        bool hitWall = false;
+        constexpr float kWallImpactDecel = 0.85f; // fraction of speed kept after a hard wall hit
+
+        if (debugMode) {
+            playerArc = track.closestArcLength(playerPos, playerArc);
+            float lookAheadArc = playerArc + glm::max(1.0f, std::fabs(speed) * 0.25f);
+            debugmode::TrackFrame here = track.sampleFrame(playerArc);
+            debugmode::TrackFrame ahead = track.sampleFrame(lookAheadArc);
+
+            float tiltAngle = std::acos(glm::clamp(glm::dot(here.up, ahead.up), -1.0f, 1.0f));
+            float threshold = glm::min(kTune.wallTiltBase + kTune.wallTiltPerSpeed * std::fabs(speed), kTune.wallTiltMax);
+
+            if (tiltAngle <= threshold) {
+                targetUp = ahead.up;
+            } else {
+                // Wall is too steep relative to our speed: don't tilt up
+                // into it, and bleed off the part of velocity driving into
+                // the wall so we "hit" it rather than climb it.
+                hitWall = true;
+                targetUp = here.up;
+
+                glm::vec3 wallNormal = glm::normalize(ahead.up - here.up * glm::dot(ahead.up, here.up));
+                if (glm::length(wallNormal) > 1e-4f) {
+                    float into = glm::dot(velocity, wallNormal);
+                    if (into > 0.0f) {
+                        velocity -= wallNormal * into;
+                        velocity *= kWallImpactDecel;
+                        speed = glm::length(velocity) * (glm::dot(velocity, forward) < 0.0f ? -1.0f : 1.0f);
                     }
                 }
+                nextPos = playerPos + velocity * dt;
             }
 
-            glm::vec3 stickWorld(stick.x, 0.0f, stick.y);
-            glm::vec3 f = stickWorld - currentUp * glm::dot(stickWorld, currentUp);
-            if (glm::length(f) > 1e-4f) forward = glm::normalize(f);
-            right = glm::normalize(glm::cross(currentUp, forward));
-            forward = glm::cross(right, currentUp);
+            // Snap onto the track's ground height/lateral bounds so we
+            // actually run ON it rather than floating over/through it.
+            debugmode::TrackFrame finalHere = track.sampleFrame(track.closestArcLength(nextPos, playerArc));
+            glm::vec3 toPos = nextPos - finalHere.position;
+            float lateral = glm::dot(toPos, finalHere.right);
+            float halfWidth = track.width() * 0.5f - 0.5f;
+            lateral = glm::clamp(lateral, -halfWidth, halfWidth);
+
+            float forwardOnTrack = glm::dot(toPos, finalHere.tangent);
+            nextPos = finalHere.position + finalHere.right * lateral + finalHere.tangent * forwardOnTrack;
+            // Re-flatten onto the surface (cancel any drift along up).
+            nextPos -= finalHere.up * glm::dot(nextPos - finalHere.position, finalHere.up);
+        } else if (worldLoaded && !worldCollision.empty()) {
+            blur::CollisionHit hit;
+            glm::vec3 probeOrigin = nextPos + currentUp * 5.0f;
+            if (worldCollision.raycast(probeOrigin, -currentUp, 50.0f, hit)) {
+                float tiltAngle = std::acos(glm::clamp(glm::dot(currentUp, hit.normal), -1.0f, 1.0f));
+                float threshold = glm::min(kTune.wallTiltBase + kTune.wallTiltPerSpeed * std::fabs(speed), kTune.wallTiltMax);
+
+                if (tiltAngle <= threshold) {
+                    nextPos = hit.point;
+                    targetUp = hit.normal;
+                } else {
+                    hitWall = true;
+                    glm::vec3 wallNormal = glm::normalize(hit.normal - currentUp * glm::dot(hit.normal, currentUp));
+                    if (glm::length(wallNormal) > 1e-4f) {
+                        float into = glm::dot(velocity, wallNormal);
+                        if (into > 0.0f) {
+                            velocity -= wallNormal * into;
+                            velocity *= kWallImpactDecel;
+                            speed = glm::length(velocity) * (glm::dot(velocity, forward) < 0.0f ? -1.0f : 1.0f);
+                        }
+                    }
+                    nextPos = playerPos + velocity * dt;
+                }
+            }
+        }
+
+        playerPos = nextPos;
+        float upEaseRate = hitWall ? 1e6f : kTune.upEase; // snap upright on impact instead of easing
+        currentUp = glm::normalize(glm::mix(currentUp, targetUp, glm::clamp(upEaseRate * dt, 0.0f, 1.0f)));
+
+        // Re-orthogonalize the basis against the (possibly tilted) up.
+        forward = glm::normalize(forward - currentUp * glm::dot(forward, currentUp));
+        right = glm::normalize(glm::cross(currentUp, forward));
+        forward = glm::cross(right, currentUp);
+
+        // Camera eases its yaw toward the player's facing so it settles in
+        // behind them as they move/turn.
+        if (stickMag > 1e-3f || std::fabs(speed) > 0.5f) {
+            float facingYaw = std::atan2(forward.x, forward.z);
+            float diff = wrapAngle(facingYaw - camYaw);
+            camYaw += diff * glm::clamp(6.0f * dt, 0.0f, 1.0f);
         }
 
         glm::mat4 basis(
@@ -238,7 +408,8 @@ int main(int argc, char** argv) {
         animModel.update(dt);
         renderer.clear();
 
-        glm::vec3 camEye = playerPos - forward * 6.0f + currentUp * 3.0f;
+        glm::vec3 camDir = glm::normalize(glm::vec3(std::sin(camYaw), 0.0f, std::cos(camYaw)));
+        glm::vec3 camEye = playerPos - camDir * 6.0f + currentUp * 3.0f;
         glm::vec3 camTarget = playerPos + currentUp * 1.2f;
         glm::mat4 view = glm::lookAt(camEye, camTarget, glm::vec3(0, 1, 0));
         glm::mat4 proj = glm::perspective(glm::radians(60.0f),

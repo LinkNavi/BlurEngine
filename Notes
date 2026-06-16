@@ -29,7 +29,7 @@ Stomping:
 	Maybe cancelable into Drop Dash with speed depending on horizontal momentum to avoid spamming
 	Bounces if you hold it
 
-2D Sections (Think Generations): 
+2D Sections (Think Generations):
 	Bounding Box based trigger system
 	Should be overly short if done right
 	Should barely even be platforming just basic reaction checks like sliding and jumping to bounce off enemys to go on paths
@@ -56,4 +56,7 @@ Enemys:
 	Make Enemys A Part Of The Stage (Secret Paths if you homing attack in a certain Direction)
 
 
-or im thnking this, since its game pad controlled, we have the joy stick pos basically be a wish positions, like if its tilted it forward then the wish pos is a few units a head of sonic, then we have sonic curve left and right based on the on wish pos, kinda like a car, then to have him tilt we calcuate the up by predicting sonic's path then checking if he'd hit a curved wall with a threshhold
+or im thnking this, since its game pad controlled, we have the joy stick pos basically be a wish positions,
+like if its tilted it forward then the wish pos is a few units a head of sonic, then we have sonic curve left and right based on the on wish pos,
+kinda like a car, then to have him tilt we calcuate the up by predicting sonic's path then checking if he'd hit a curved wall with a threshhold,
+if the threshhold is hit we just hit the wall instead of running up it, maybe scale the threshold by the current speed

@@ -1,7 +1,10 @@
+#define GLM_ENABLE_EXPERIMENTAL
 #include "track.hpp"
 
 #include <glm/gtc/quaternion.hpp>
+#include <glm/gtx/norm.hpp>
 #include <algorithm>
+#include <limits>
 
 namespace debugmode {
 
@@ -142,6 +145,44 @@ TrackFrame EndlessTrack::sampleFrame(float s) const {
     out.up = glm::normalize(glm::cross(out.tangent, out.right));
     out.arcLength = s;
     return out;
+}
+
+float EndlessTrack::closestArcLength(const glm::vec3& worldPos, float hintArc, float searchRadius) const {
+    if (m_nodes.empty()) return 0.0f;
+
+    float lo = glm::clamp(hintArc - searchRadius, m_nodes.front().arcLength, m_nodes.back().arcLength);
+    float hi = glm::clamp(hintArc + searchRadius, m_nodes.front().arcLength, m_nodes.back().arcLength);
+
+    // Coarse scan over the windowed node range to find the nearest node,
+    // then refine with a couple of golden-section-ish bisection steps
+    // against sampleFrame so we're not stuck at segment resolution.
+    float bestArc = glm::clamp(hintArc, m_nodes.front().arcLength, m_nodes.back().arcLength);
+    float bestDist = std::numeric_limits<float>::max();
+
+    for (const TrackFrame& n : m_nodes) {
+        if (n.arcLength < lo || n.arcLength > hi) continue;
+        float d = glm::length2(n.position - worldPos);
+        if (d < bestDist) {
+            bestDist = d;
+            bestArc = n.arcLength;
+        }
+    }
+
+    float step = m_segmentLength;
+    for (int i = 0; i < 6; i++) {
+        step *= 0.5f;
+        float left = bestArc - step;
+        float right = bestArc + step;
+
+        float dl = glm::length2(sampleFrame(left).position - worldPos);
+        float dr = glm::length2(sampleFrame(right).position - worldPos);
+        float dc = glm::length2(sampleFrame(bestArc).position - worldPos);
+
+        if (dl < dc && dl <= dr) bestArc = left;
+        else if (dr < dc && dr <= dl) bestArc = right;
+    }
+
+    return glm::clamp(bestArc, m_nodes.front().arcLength, m_nodes.back().arcLength);
 }
 
 void EndlessTrack::draw() const {
